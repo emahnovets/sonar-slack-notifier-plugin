@@ -8,11 +8,7 @@ import org.sonar.api.ce.posttask.PostProjectAnalysisTask;
 import org.sonar.api.ce.posttask.QualityGate;
 import org.sonar.api.i18n.I18n;
 import org.sonar.api.measures.CoreMetrics;
-import org.sonar.api.utils.log.Logger;
-import org.sonar.api.utils.log.Loggers;
 
-import java.text.DecimalFormat;
-import java.text.NumberFormat;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -22,17 +18,24 @@ import java.util.stream.Collectors;
  */
 
 public class ProjectAnalysisPayloadBuilder {
-    private static final Logger LOG = Loggers.get(ProjectAnalysisPayloadBuilder.class);
-
     private static final String SLACK_GOOD_COLOUR = "good";
     private static final String SLACK_WARNING_COLOUR = "warning";
     private static final String SLACK_DANGER_COLOUR = "danger";
-    private static final Map<QualityGate.Status, String> statusToColor = new EnumMap<>(QualityGate.Status.class);
+    private static final Map<QualityGate.EvaluationStatus, String> statusToColor = new EnumMap<>(QualityGate.EvaluationStatus.class);
 
     static {
-        statusToColor.put(QualityGate.Status.OK, SLACK_GOOD_COLOUR);
-        statusToColor.put(QualityGate.Status.WARN, SLACK_WARNING_COLOUR);
-        statusToColor.put(QualityGate.Status.ERROR, SLACK_DANGER_COLOUR);
+        statusToColor.put(QualityGate.EvaluationStatus.OK, SLACK_GOOD_COLOUR);
+        statusToColor.put(QualityGate.EvaluationStatus.WARN, SLACK_WARNING_COLOUR);
+        statusToColor.put(QualityGate.EvaluationStatus.ERROR, SLACK_DANGER_COLOUR);
+    }
+
+    private static final List<String> countersConditionKeys = new ArrayList<>();
+
+    static {
+        countersConditionKeys.add(CoreMetrics.CRITICAL_VIOLATIONS_KEY);
+        countersConditionKeys.add(CoreMetrics.BLOCKER_VIOLATIONS_KEY);
+        countersConditionKeys.add(CoreMetrics.MAJOR_VIOLATIONS_KEY);
+        countersConditionKeys.add(CoreMetrics.MINOR_VIOLATIONS_KEY);
     }
 
     I18n i18n;
@@ -41,13 +44,8 @@ public class ProjectAnalysisPayloadBuilder {
     private String slackUser;
     private String projectUrl;
 
-    private DecimalFormat percentageFormat;
-
     private ProjectAnalysisPayloadBuilder(PostProjectAnalysisTask.ProjectAnalysis analysis) {
         this.analysis = analysis;
-        // Format percentages as 25.01 instead of 25.0066666666666667 etc.
-        this.percentageFormat = new DecimalFormat();
-        this.percentageFormat.setMaximumFractionDigits(2);
     }
 
     public static ProjectAnalysisPayloadBuilder of(PostProjectAnalysisTask.ProjectAnalysis analysis) {
@@ -83,9 +81,8 @@ public class ProjectAnalysisPayloadBuilder {
 
         QualityGate qualityGate = analysis.getQualityGate();
         String shortText = String.join("",
-                "Project [", analysis.getProject().getName(), "] analyzed. See ",
-                projectUrl,
-                qualityGate == null ? "." : ". Quality gate status: " + qualityGate.getStatus());
+                "Project [", analysis.getProject().getName(), "] analyzed",
+                qualityGate == null ? "." : ". Quality gate status: " + getQualityGateEmoji(qualityGate));
 
         return Payload.builder()
                 .channel(projectConfig.getSlackChannel())
@@ -95,125 +92,66 @@ public class ProjectAnalysisPayloadBuilder {
                 .build();
     }
 
+    private String getQualityGateEmoji(QualityGate qualityGate) {
+        if (qualityGate.getStatus().equals(QualityGate.Status.OK)) {
+            return "Ok :party_parrot:";
+        } else if (qualityGate.getStatus().equals(QualityGate.Status.ERROR)) {
+            return "Error :facepalm_skype:";
+        }
+
+        return "Warning :alert:";
+    }
+
     private void assertNotNull(Object object, String argumentName) {
         if (object == null) {
-            throw new IllegalArgumentException("[Assertion failed] - " +argumentName + " argument is required; it must not be null");
+            throw new IllegalArgumentException("[Assertion failed] - " + argumentName + " argument is required; it must not be null");
         }
     }
 
     private List<Attachment> buildConditionsAttachment(QualityGate qualityGate, boolean qgFailOnly) {
-
         List<Attachment> attachments = new ArrayList<>();
-        attachments.add(Attachment.builder()
-                .fields(
-                        qualityGate.getConditions()
-                                .stream()
-                                .filter(condition -> !qgFailOnly || notOkNorNoValue(condition))
-                                .map(this::translate)
-                                .collect(Collectors.toList()))
-                .color(statusToColor.get(qualityGate.getStatus()))
-                .build());
+
+        attachments.add(getCountersCondition(qualityGate.getConditions()));
+        attachments.addAll(qualityGate.getConditions()
+            .stream()
+            .filter(condition -> !countersConditionKeys.contains(condition.getMetricKey()))
+            .map(this::getAttachment)
+            .collect(Collectors.toList()));
+
         return attachments;
     }
 
-    private boolean notOkNorNoValue(QualityGate.Condition condition) {
-        return !(QualityGate.EvaluationStatus.OK.equals(condition.getStatus())
-                || QualityGate.EvaluationStatus.NO_VALUE.equals(condition.getStatus()));
+    private Attachment getCountersCondition(Collection<QualityGate.Condition> conditions) {
+        return Attachment.builder()
+            .fields(
+                conditions
+                    .stream()
+                    .filter(condition -> countersConditionKeys.contains(condition.getMetricKey()))
+                    .map(condition -> Field
+                        .builder()
+                        .title(getConditionName(condition))
+                        .value(condition.getValue())
+                        .valueShortEnough(true)
+                        .build()
+                    )
+                    .collect(Collectors.toList())
+            )
+            .color("#2d9ee0")
+            .build();
     }
 
-    /**
-     * See https://api.slack.com/docs/message-attachments#message_formatting
-     *
-     * @param condition
-     * @return
-     */
-    private Field translate(QualityGate.Condition condition) {
-        String i18nKey = "metric." + condition.getMetricKey() + ".name";
-        String conditionName = i18n.message(Locale.ENGLISH, i18nKey, condition.getMetricKey());
-
-        if (QualityGate.EvaluationStatus.NO_VALUE.equals(condition.getStatus())) {
-            // No value for given metric
-            return Field.builder().title(conditionName)
-                    .value(condition.getStatus().name())
-                    .valueShortEnough(true)
-                    .build();
-        } else {
-            StringBuilder sb = new StringBuilder();
-            appendValue(condition, sb);
-            appendValuePostfix(condition, sb);
-            if (condition.getWarningThreshold() != null) {
-                sb.append(", warning if ");
-                appendValueOperatorPrefix(condition, sb);
-                sb.append(condition.getWarningThreshold());
-                appendValuePostfix(condition, sb);
-            }
-            if (condition.getErrorThreshold() != null) {
-                sb.append(", error if ");
-                appendValueOperatorPrefix(condition, sb);
-                sb.append(condition.getErrorThreshold());
-                appendValuePostfix(condition, sb);
-            }
-            return Field.builder().title(conditionName + ": " + condition.getStatus().name())
-                    .value(sb.toString())
-                    .valueShortEnough(false)
-                    .build();
-
-        }
+    private Attachment getAttachment(QualityGate.Condition condition) {
+        return Attachment.builder()
+            .title(getConditionName(condition))
+            .text(condition.getValue())
+            .color(statusToColor.get(condition.getStatus()))
+            .build();
     }
 
-    private void appendValue(QualityGate.Condition condition, StringBuilder sb) {
-        if ("".equals(condition.getValue())) {
-            sb.append("-");
-        } else {
-            if (valueIsPercentage(condition)){
-                appendPercentageValue(condition.getValue(), sb);
-            }else {
-                sb.append(condition.getValue());
-            }
-        }
+    private String getConditionName(QualityGate.Condition condition) {
+        String conditionMetricKey = condition.getMetricKey();
+        String i18nKey = "metric." + conditionMetricKey + ".name";
+
+        return i18n.message(Locale.ENGLISH, i18nKey, conditionMetricKey);
     }
-
-    private void appendPercentageValue(String s, StringBuilder sb) {
-        try {
-            Double d = Double.parseDouble(s);
-            sb.append(percentageFormat.format(d));
-        }catch(NumberFormatException e){
-            LOG.error("Failed to parse [{}] into a Double due to [{}]", s, e.getMessage());
-            sb.append(s);
-        }
-    }
-
-    private void appendValueOperatorPrefix(QualityGate.Condition condition, StringBuilder sb) {
-        switch (condition.getOperator()) {
-            case EQUALS:
-                sb.append("==");
-                break;
-            case NOT_EQUALS:
-                sb.append("!=");
-                break;
-            case GREATER_THAN:
-                sb.append(">");
-                break;
-            case LESS_THAN:
-                sb.append("<");
-                break;
-        }
-    }
-
-    private void appendValuePostfix(QualityGate.Condition condition, StringBuilder sb) {
-        if(valueIsPercentage(condition)){
-            sb.append("%");
-        }
-    }
-
-    private boolean valueIsPercentage(QualityGate.Condition condition){
-        switch (condition.getMetricKey()) {
-            case CoreMetrics.NEW_COVERAGE_KEY:
-            case CoreMetrics.NEW_SQALE_DEBT_RATIO_KEY:
-                return true;
-        }
-        return false;
-    }
-
-
 }

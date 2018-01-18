@@ -40,7 +40,7 @@ public class SlackNotifierPlugin implements Plugin {
             .build());
         extensions.add(PropertyDefinition.builder(USER.property())
             .name("Slack user alias")
-            .description("Messages from this plugin appear woth given username")
+            .description("Messages from this plugin appear with given username")
             .defaultValue("SonarQube Slack Notifier Plugin")
             .type(PropertyType.STRING)
             .category(CATEGORY)
@@ -77,7 +77,7 @@ public class SlackNotifierPlugin implements Plugin {
                         .description("Channel to send project specific messages to")
                         .type(PropertyType.STRING)
                         .build(),
-                        PropertyFieldDefinition.build(QG_FAIL_ONLY.property())
+                    PropertyFieldDefinition.build(QG_FAIL_ONLY.property())
                         .name("Send on failed Quality Gate")
                         .description("Should notification be sent only if Quality Gate did not pass OK")
                         .type(PropertyType.BOOLEAN)
